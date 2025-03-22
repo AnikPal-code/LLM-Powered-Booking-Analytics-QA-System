@@ -1,216 +1,152 @@
-import streamlit as st
-import requests
-import time
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+import faiss
+import numpy as np
 import pandas as pd
-from datetime import datetime
+from sklearn.preprocessing import StandardScaler
+from time import time
+from io import StringIO
+from typing import Dict, Any
 
-# Page configuration
-st.set_page_config(
-    page_title="LLM Booking Analyzer",
-    page_icon="📊",
-    layout="wide"
-)
+# Load model and tokenizer
+MODEL_NAME = "google/flan-t5-large"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: #1E88E5;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: #0D47A1;
-        margin: 1rem 0;
-    }
-    .highlight {
-        color: #1E88E5;
-        font-weight: 600;
-    }
-    .stButton > button {
-        background-color: #1E88E5;
-        color: white;
-        border-radius: 0.3rem;
-        padding: 0.5rem 1rem;
-        border: none;
-        font-weight: 600;
-    }
-    .stButton > button:hover {
-        background-color: #0D47A1;
-    }
-    .result-container {
-        padding: 1rem;
-        border-left: 4px solid #1E88E5;
-        background-color: rgba(30, 136, 229, 0.05);
-        margin: 1rem 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Load FAISS index
+FAISS_INDEX_PATH = "faiss_bookings.index"
+try:
+    index = faiss.read_index(FAISS_INDEX_PATH)
+    print(f"✅ FAISS index loaded with {index.ntotal} vectors.")
+except Exception as e:
+    print(f"❌ Error loading FAISS index: {str(e)}")
+    index = None
 
-# FastAPI Backend URL
-# Change this if your API is running on a different URL
-BASE_URL = "http://127.0.0.1:8000"
+# Load cleaned dataset
+DATASET_PATH = "hotel_bookings_cleaned.csv"
+try:
+    df = pd.read_csv(DATASET_PATH)
+    print(f"✅ Cleaned dataset loaded with {len(df)} records.")
+except Exception as e:
+    print(f"❌ Error loading dataset: {str(e)}")
+    df = None
 
-# Header
-st.markdown('<div class="main-header">🏨LLM-Powered Booking Analytics & QA System </div>',
-            unsafe_allow_html=True)
-st.markdown(
-    'Analyze your hotel booking data and get AI-powered insights instantly.')
+# Feature scaling for FAISS retrieval
+NUMERIC_FEATURES = ['lead_time', 'adr', 'stays_in_week_nights', 'stays_in_weekend_nights']
+scaler = StandardScaler()
+if df is not None:
+    df[NUMERIC_FEATURES] = df[NUMERIC_FEATURES].fillna(0)
+    vectors = scaler.fit_transform(df[NUMERIC_FEATURES].values)
+else:
+    vectors = None
 
-# Create tabs with custom styling - removed batch upload tab
-tabs = st.tabs(["💬 Ask a Question", "📈 Analytics Report"])
+# Initialize FastAPI
+app = FastAPI()
 
-# ------------------ ASK A QUESTION TAB ------------------
-with tabs[0]:
-    st.markdown('<div class="sub-header">💬 Ask About Your Booking Data</div>',
-                unsafe_allow_html=True)
+# Request models
+class AskRequest(BaseModel):
+    question: str
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        question = st.text_area("Enter your question about hotel bookings:",
-                                placeholder="Example: What factors lead to booking cancellations?",
-                                height=100)
-        examples = st.expander("📝 Example questions")
-        with examples:
-            st.markdown("""
-            - Which month has the highest booking rate?
-            - What's the average length of stay in city hotels vs. resort hotels?
-            - Is there a correlation between lead time and cancellation rate?
-            """)
+class AnalyticsRequest(BaseModel):
+    data: str
 
-    with col2:
-        st.markdown('<br>', unsafe_allow_html=True)
-        ask_button = st.button("🔍 Get Answer", use_container_width=True)
+# ---------- HELPER FUNCTIONS ----------
 
-    if ask_button and question:
-        with st.spinner("Analyzing your question..."):
-            try:
-                start_time = time.time()
-                response = requests.post(
-                    f"{BASE_URL}/ask", json={"question": question}, timeout=30)
-                end_time = time.time()
+def retrieve_similar_bookings(query_vector, top_k=5):
+    if index is None or df is None:
+        return "No FAISS index or dataset loaded."
+    
+    if query_vector.shape[1] != index.d:
+        return "Query vector dimension mismatch. Cannot search in FAISS index."
 
-                if response.status_code == 200:
-                    data = response.json()
+    distances, indices = index.search(query_vector, top_k)
+    valid_indices = [idx for idx in indices[0] if 0 <= idx < len(df)]
+    
+    if not valid_indices:
+        return "No matching bookings found in FAISS index. Try adjusting search criteria."
 
-                    st.markdown('<div class="result-container">',
-                                unsafe_allow_html=True)
-                    st.markdown("### 🤖 Answer")
-                    st.markdown(data['answer'])
-                    st.markdown(
-                        f"<small>⏱️ Response time: {data.get('response_time', end_time - start_time):.2f} seconds</small>", unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                else:
-                    st.error(
-                        f"Error: {response.status_code} - {response.text}")
-            except Exception as e:
-                st.error(f"Failed to connect to the API: {str(e)}")
-    elif ask_button:
-        st.warning("Please enter a question first.")
+    return df.iloc[valid_indices]
 
-# ------------------ ANALYTICS REPORT TAB ------------------
-with tabs[1]:
-    st.markdown('<div class="sub-header">📊 Generate Booking Analytics Report</div>',
-                unsafe_allow_html=True)
+def analyze_csv_data(csv_data: str) -> Dict[str, Any]:
+    try:
+        df = pd.read_csv(StringIO(csv_data))
 
-    col1, col2 = st.columns(2)
+        if df.empty:
+            raise ValueError("Parsed CSV data contains no records.")
 
-    with col1:
-        # Hotel selection with icons
-        hotel = st.selectbox(
-            "🏢 Hotel Type",
-            options=["City Hotel", "Resort Hotel"],
-            index=0
-        )
+        required_columns = {"arrival_date_year", "arrival_date_month", "hotel", "is_canceled", "reservation_status_date"}
+        if not required_columns.issubset(df.columns):
+            raise ValueError("Missing required booking columns in data.")
 
-        # Arrival date selection
-        arrival_date_year = st.selectbox(
-            "📅 Arrival Year",
-            options=["2022", "2023", "2024"],
-            index=1
-        )
+        df["reservation_status_date"] = pd.to_datetime(df["reservation_status_date"], errors='coerce')
+        df = df[df["is_canceled"] == 0]
 
-        arrival_date_month = st.selectbox(
-            "📅 Arrival Month",
-            options=[
-                "January", "February", "March", "April", "May", "June",
-                "July", "August", "September", "October", "November", "December"
-            ],
-            index=6
-        )
+        if df.empty:
+            return {"report": "No valid (non-canceled) bookings found in the dataset."}
 
-    with col2:
-        # Date picker for reservation status date
-        default_date = datetime.strptime("2023-07-15", "%Y-%m-%d")
-        reservation_status_date = st.date_input(
-            "📆 Reservation Status Date",
-            value=default_date
-        )
+        valid_bookings = len(df)
+        most_common_hotel = df["hotel"].mode()[0] if not df["hotel"].empty else "Unknown"
+        monthly_counts = df["arrival_date_month"].value_counts()
+        top_months = monthly_counts.head(3).to_dict()
+        top_months_str = ", ".join(f"{month} ({count} bookings)" for month, count in top_months.items())
 
-        # Prettier booking status selector
-        is_canceled = st.radio(
-            "🚫 Booking Status",
-            options=["Confirmed", "Canceled"],
-            index=0,
-            horizontal=True
-        )
+        report = f"""
+        📊 **Hotel Booking Analysis**
+        - **Total Valid Bookings:** {valid_bookings}
+        - **Most Booked Hotel Type:** {most_common_hotel}
+        - **Top 3 Booking Months:** {top_months_str}
+        """
 
-        # Convert "Confirmed"/"Canceled" to 0/1 for API
-        is_canceled_val = 1 if is_canceled == "Canceled" else 0
+        return {"report": report.strip()}
 
-    # Generate button
-    if st.button("🚀 Generate Analytics Report", use_container_width=True):
-        with st.spinner("Generating comprehensive booking analysis..."):
-            booking_data = (
-                f"arrival_date_year,arrival_date_month,hotel,is_canceled,reservation_status_date\n"
-                f"{arrival_date_year},{arrival_date_month},{hotel},{is_canceled_val},{reservation_status_date}"
-            )
+    except Exception as e:
+        raise ValueError(f"Analysis failed: {str(e)}")
 
-            try:
-                response = requests.post(
-                    f"{BASE_URL}/analytics", json={"data": booking_data}, timeout=45)
+# ---------- API ENDPOINTS ----------
 
-                if response.status_code == 200:
-                    data = response.json()
+@app.post("/ask")
+async def ask_question(request: AskRequest):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-                    # Show the report in a nicely formatted container
-                    st.markdown('<div class="result-container">',
-                                unsafe_allow_html=True)
-                    st.markdown("### 📑 Booking Analytics Report")
+    start_time = time()
 
-                    # Split the report into sections for better visualization
-                    report_parts = data['report'].split('\n\n')
+    if df is None or index is None:
+        return {"answer": "Dataset not loaded. Please ensure FAISS and dataset are available.", "response_time": 0.1}
 
-                    for i, part in enumerate(report_parts):
-                        if i == 0:  # Summary
-                            st.markdown(f"**{part}**")
-                        else:  # Other sections
-                            st.markdown(part)
-                            if i < len(report_parts) - 1:
-                                st.markdown("---")
+    query_vector = np.random.rand(1, index.d).astype("float32")
 
-                    # Add download button for the report
-                    st.download_button(
-                        label="📥 Download Report",
-                        data=data['report'],
-                        file_name=f"booking_analysis_{datetime.now().strftime('%Y%m%d')}.txt",
-                        mime="text/plain"
-                    )
-                    st.markdown('</div>', unsafe_allow_html=True)
-                else:
-                    st.error(
-                        f"Error: {response.status_code} - {response.text}")
-            except Exception as e:
-                st.error(f"Failed to connect to the API: {str(e)}")
+    if query_vector.shape[1] != index.d:
+        return {"answer": "Query vector dimension mismatch. Cannot search in FAISS index.", "response_time": 0.1}
 
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #666;'>"
-    "© 2025 LLM Booking Analysis | Built with Streamlit and FastAPI"
-    "</div>",
-    unsafe_allow_html=True
-)
+    relevant_data = retrieve_similar_bookings(query_vector)
+
+    if isinstance(relevant_data, str):
+        return {"answer": relevant_data, "response_time": 0.1}
+
+    try:
+        context = relevant_data.to_string(index=False)
+        prompt = f"Using the following hotel booking data:\n{context}\n\nAnswer the question: {request.question}\n\n"
+
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        output = model.generate(**inputs, max_length=150, temperature=0.7, do_sample=True, top_k=50)
+        decoded_output = tokenizer.decode(output[0], skip_special_tokens=True)
+
+        response_time = time() - start_time
+        return {"answer": decoded_output, "response_time": round(response_time, 3)}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+@app.post("/analytics")
+async def analytics(request: AnalyticsRequest):
+    if not request.data.strip():
+        raise HTTPException(status_code=400, detail="CSV data cannot be empty.")
+    
+    try:
+        analysis = analyze_csv_data(request.data)
+        return analysis
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Analysis failed: {str(e)}")
