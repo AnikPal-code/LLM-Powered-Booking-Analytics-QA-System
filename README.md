@@ -19,6 +19,8 @@ This project integrates a Large Language Model (LLM) with analytics and an API t
   pip install -r requirements.txt
   ```
 
+## For Checking out my Analytics & Reporting: https://github.com/AnikPal-code/LLM-Powered-Booking-Analytics-QA-System/edit/main/buyogo.ipynb
+
 ### Running the Application
 1. Clone the repository:
    ```bash
