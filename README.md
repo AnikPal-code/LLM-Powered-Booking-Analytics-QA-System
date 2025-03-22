@@ -2,6 +2,8 @@
 
 # README
 
+## Streamlit Application: Note: Facing some port related issue that is needed to be resolved.
+https://llm-powered-booking-analytics-app-system-furg3qngbtxktlpiwhdah.streamlit.app/
 ## Project Overview
 This project integrates a Large Language Model (LLM) with analytics and an API to process and analyze user queries. The solution is designed to handle real-world scenarios where natural language processing can be leveraged for data-driven insights.
 
